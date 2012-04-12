@@ -237,30 +237,37 @@ def subst(v, x, i, e):
     elif typ == 'lam':
         typ, var, body = e
         if x == var: i += 1
-        v = lift(var, 0, v)
+        v = lift(var, 0, v) or v
         return (typ, var, subst(v,x,i,body))
 
     else:
         raise Malformed('unrecognized expression type: %r' % typ)
 
 def lift(x, i, e):
+    # Returns None if no lifting was necessary. Helps conserve memory.
     typ = e[0]
     if typ == 'var':
         typ, name, idx = e
         if name == x and idx >= i:
             return (typ, name, idx + 1)
-        return e
+        return None
 
     elif typ == 'app':
-        return (typ, lift(x,i,e[1]), lift(x,i,e[2]))
+        a, b = lift(x,i,e[1]), lift(x,i,e[2])
+        if a or b:
+            return (a or e[1], b or e[2])
+        return None
 
     elif typ == 'lam':
         typ, var, body = e
         if x == var: i += 1
-        return (typ, var, lift(x, i, body))
+        body = lift(x, i, body)
+        if body:
+            return (typ, var, lift(x, i, body))
+        return None
 
     elif typ == 'val':
-        return e
+        return None
 
     else:
         raise Malformed('unrecognized expression type: %r' % typ)
