@@ -298,20 +298,38 @@ class Repl(object):
         words = line.split(None, 1)
         if not words: return
         cmd = words[0]
-        if words[1:]: rest = words[1]
+        if words[1:]: rest = words[1].lstrip()
         else: rest = ''
 
         if cmd == 'step':
             self.do_step(self.rest_or_last(rest, 'step'))
+
         elif cmd == 'exit':
             self.exit()
+
         elif cmd == 'eval':
             self.do_eval(self.rest_or_last(rest, 'eval'))
+
+        elif cmd == 'reset':
+            print 'Resetting global variables'
+            self.globals = {}
+
+        elif cmd == 'globals':
+            print "Global variables:"
+            for (k,v) in self.globals.iteritems():
+                print '  %s = %s' % (k, pretty(v))
+
+        elif rest.startswith('= '):
+            # Setting a global
+            e = self.parse(rest[2:])
+            self.last = e
+            self.globals[cmd] = self.eval(e)
+
         else:
+            # Default is to eval the expression.
             self.do_eval(line)
 
     def rest_or_last(self, rest, purpose):
-        rest = rest.lstrip()
         if rest:
             return self.parse(rest)
         elif self.last:
@@ -343,5 +361,11 @@ class Repl(object):
 
     def step(self, expr):
         return step(expr, macros = self.globals)
+
+def repl():
+    global r
+    if not isinstance(r, Repl):
+        r = Repl()
+    r.repl()
 
 print 'here'
