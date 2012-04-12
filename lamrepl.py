@@ -355,9 +355,11 @@ class Repl(object):
 
     def eval(self, expr):
         for i in xrange(self.max_steps):
-            if isvalue(expr): break
+            if isvalue(expr):
+                return expr
             expr = self.step(expr)
-        return expr
+        raise LamError('evaluation took more than %s steps, aborting' %
+                       self.max_steps)
 
     def step(self, expr):
         return step(expr, macros = self.globals)
