@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+# NOTES ON IMPLEMENTATION
+
 # Lambda terms are either:
 # - ("var", x, i)
 #   for the variable with name `x' and disambiguation index `i'
