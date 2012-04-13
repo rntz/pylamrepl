@@ -19,17 +19,39 @@
 # - ("lam", x, e)
 #   for (\x. e)
 #
-# - ("val", v)
-#   for an embedded value. any python value will do. Calling an embedded value
-#   in the lambda calculus will, unsurprisingly, call it in Python. Note that
-#   this means it had better be unary; if you want multiarg embedded functions
-#   you must curry manually.
+# - ("val", v[, name[, prec, fix]])
+#
+#   for an embedded value. any python value will do. If present, `name' is used
+#   for pretty-printing. Calling an embedded value in the lambda calculus will,
+#   unsurprisingly, call it in Python. Note that this means it had better be
+#   unary; if you want multiarg embedded functions you must curry manually.
+#
+#   If present, prec and fix indicate that this is an infix operator with the
+#   given precedence and fixity.
 
 # ---------- UTILITY ----------
-def embed(x): return ('val', x)
-
 class LamError(Exception): pass
 class Malformed(LamError): pass
+
+def expect(v, pytyp = None):
+    if pytyp is None: return v
+    name = pytyp.__name__
+    if v[0] != 'val':
+        raise Stuck('expected %s, but got lambda term' % name)
+    elif pytyp and not isinstance(v[1], pytyp):
+        raise Stuck('expected %s, but got %s' % (name, type(v[1]).__name__))
+    else:
+        return v[1]
+
+def embed(x, *args): return ('val', x) + args
+
+def embed_func(argtypes, func, *extras):
+    assert argtypes
+    if len(argtypes) == 1:
+        return embed(lambda x: func(expect(x, argtypes[0]))) + extras
+    else:
+        f = lambda x: embed_func(argtypes[1:], (lambda *args: func(x, *args)))
+        return embed_func([argtypes[0]], f, *extras)
 
 
 # ---------- PRETTY-PRINTER ----------
@@ -63,6 +85,12 @@ def pretty(e, pos = 0):
         return s
 
     elif typ == 'val':
+        if len(e) >= 3:
+            # value with special name
+            if len(e) > 3:
+                # infix operator
+                return '(' + e[2] + ')'
+            return e[2]
         return repr(e[1])
 
     else:
@@ -74,6 +102,7 @@ def pretty(e, pos = 0):
 # Can parse numbers and strings as embedded python values. If you give a
 # dictionary for macros, it will parse variable names in "macros" as whatever
 # they map to. This means they should map to lambda terms!
+
 class ParseError(LamError): pass
 class ParseEnd(ParseError): pass
 class ParseEmpty(ParseEnd): pass
@@ -85,16 +114,18 @@ re_var = re.compile(res_var)
 re_lamopen = re.compile(r'\\\s*(' + res_var + r')\s*\.')
 re_popen = re.compile(r'\(')
 re_pclose = re.compile(r'\)')
-re_int = re.compile(r'[0-9]+')
-re_str = re.compile(r'"([^"\\]*)"')
+re_int = re.compile(r'-?[0-9]+')
+re_str = re.compile(r'"[^"\\]*"|'r"'[^'\\]*'")
 
 def parse(s, macros=None):
-    p = Parser(macros)
+    p = Parser(macros = macros)
     return p.parse(s)
 
 class Parser(object):
     def __init__(self, macros=None):
         self.macros = macros or {}
+        self.infixes = {k: v for k,v in self.macros.iteritems()
+                        if len(v) > 3}
 
     def parse(self, s):
         (x, s) = self.parse_whole(s)
@@ -112,23 +143,117 @@ class Parser(object):
             (body, s) = self.parse_whole(s[m.end():])
             return (('lam', argname, body), s)
 
+        # see if the whole thing is just one infix operator; then we can return
+        # it. this allows eg. (+) for the + operator.
+        (o,snew) = self.parse_oper(s)
+        snew = snew.lstrip()
+        if o and (not snew or re_pclose.match(snew)):
+            return o, snew
+
         return self.parse_app(s)
 
     def parse_app(self, s):
-        res, s = self.parse_one(s)
+        e, s = self.parse_one(s)
+        exps = [e]
+
         while True:
+            (oper, s) = self.parse_oper(s)
             try:
                 (arg, snew) = self.parse_one(s)
             except ParseEnd:
-                break
+                if oper is None: # application
+                    break
+                raise
             else:
-                res = ('app', res, arg)
+                # push operator onto stack
+                exps.extend([oper,arg])
                 s = snew
-        return res, s
+
+        def precfix(x):
+            if x is None: return 0, -1
+            else: return x[3:]
+
+        # parse the expression list according to precedence.
+        def pop_expr(prec, fixity):
+            subexps = []
+            while len(exps) >= 2:
+                nextprec, nextfix = precfix(exps[-2])
+                if nextprec > prec:
+                    # next op binds looser than us.
+                    break
+                elif nextprec < prec:
+                    # next op binds tighter than us
+                    exps.append(pop_expr(nextprec, nextfix))
+                else:
+                    # next op has our precedence.
+                    if nextfix != fixity:
+                        raise ParseError(
+                            "cannot mix operators of same precedence but " +
+                            "different fixity")
+                    subexps.append(exps.pop()) # argument
+                    subexps.append(exps.pop()) # operator
+
+            subexps.append(exps.pop()) # final argument
+
+            def app(op, arg1, arg2):
+                if op is None:
+                    return ('app', arg1, arg2)
+                else:
+                    return ('app', ('app', op, arg1), arg2)
+
+            # okay, now we must parse subexps, which is an interleaved list of
+            # exps and operators of our fixity and precedence, in order.
+            if fixity == 0 and len(subexps) > 3:
+                raise ParseError("bad use of nonassociative infix operators")
+
+            if fixity < 0:
+                # left-associative
+                exp = subexps.pop()
+                while subexps:
+                    op = subexps.pop()
+                    arg = subexps.pop()
+                    exp = app(op, exp, arg)
+            else:
+                # right-associative
+                subexps.reverse()
+                exp = subexps.pop()
+                while subexps:
+                    op = subexps.pop()
+                    arg = subexps.pop()
+                    exp = app(op, arg, exp)
+            return exp
+
+        return (pop_expr(float("+inf"), 0), s) # hack
+
+        # exp = exps.pop()
+        # while exps:
+        #     oper = exps.pop()
+        #     (prec, fixity, val) = oper or (
+
+    def parse_oper(self, s):
+        s = s.lstrip()
+        for (name, op) in self.infixes.iteritems():
+            if s.startswith(name):
+                return (op, s[len(name):])
+
+        oper = None             # application
+        return (oper, s)
 
     def parse_one(self, s):
         s = s.lstrip()
         if not s: raise ParseEmpty('unexpected end of input')
+
+        m = re_int.match(s)
+        if m:
+            return (('val', int(m.group())), s[m.end():])
+
+        m = re_str.match(s)
+        if m:
+            return (('val', m.group()[1:-1]), s[m.end():])
+
+        for (name, op) in self.infixes.iteritems():
+            if s.startswith(name):
+                raise ParseError("bad use of infix operator " + name)
 
         m = re_var.match(s)
         if m:
@@ -137,15 +262,7 @@ class Parser(object):
                 v = self.macros[name]
             else:
                 v = ('var',name,0)
-                return (v, s[m.end():])
-
-        m = re_int.match(s)
-        if m:
-            return (('val', int(m.group())), s[m.end():])
-
-        m = re_str.match(s)
-        if m:
-            return (('val', m.group(1)), s[m.end():])
+            return (v, s[m.end():])
 
         m = re_popen.match(s)
         if m:
@@ -157,7 +274,7 @@ class Parser(object):
             return (x, s[m.end():])
 
         if re_pclose.match(s):
-            raise ParseClose('unexpect close paren: ' + s)
+            raise ParseClose('unexpected close paren: ' + s)
 
         raise ParseError('could not parse: ' + s)
 
@@ -203,11 +320,11 @@ def step(e, macros=None):
             ftyp, fvar, fbody = fnc
             return subst(arg, fvar, 0, fbody)
         elif fnc[0] == 'val':
-            ftyp, fval = fnc
+            ftyp, fval = fnc[:2]
             try:
                 return fval(arg)
-            except TypeError:
-                raise Stuck('tried to call non-function?')
+            except TypeError as e:
+                raise Stuck(str(e))
         else:
             raise Stuck(
                 "value in function position not lambda or embedded value")
@@ -273,12 +390,47 @@ def lift(x, i, e):
         raise Malformed('unrecognized expression type: %r' % typ)
 
 
+# ---------- BUILTINS ----------
+def iffnc(c,t,e):
+    if c: return t
+    else: return e
+
+lam_true = embed(True, 'true')
+lam_false = embed(False, 'false')
+embed_bool = lambda x: lam_true if x else lam_false
+
+lam_add = embed_func([object, object], (lambda x,y: embed(x+y)), '+', 5, 1)
+lam_sub = embed_func([object, object], (lambda x,y: embed(x-y)), '-', 5, 1)
+lam_mul = embed_func([object, object], (lambda x,y: embed(x*y)), '*', 4, 1)
+lam_div = embed_func([object, object], (lambda x,y: embed(x/y)), '/', 4, 1)
+
+lam_if = embed_func([bool, None, None], iffnc, 'if')
+
+lam_eq  = embed_func([None,None], (lambda x,y: embed_bool(x==y)), '==', 10, 0)
+lam_neq = embed_func([None,None], (lambda x,y: embed_bool(x!=y)), '!=', 10, 0)
+lam_lt  = embed_func([None,None], (lambda x,y: embed_bool(x<y)) , '<',  10, 0)
+lam_leq = embed_func([None,None], (lambda x,y: embed_bool(x<=y)), '<=', 10, 0)
+lam_gt  = embed_func([None,None], (lambda x,y: embed_bool(x>y)),  '>',  10, 0)
+lam_geq = embed_func([None,None], (lambda x,y: embed_bool(x>=y)), '>=', 10, 0)
+
+
 # ---------- REPL ----------
 class ExitRepl(Exception): pass
 
 class Repl(object):
-    def __init__(self, exit_when_done=False):
+    builtins = { '+': lam_add, '*': lam_mul,
+                 '-': lam_sub, '/': lam_div,
+                 'if': lam_if,
+                 'true': embed(True, 'true'),
+                 'false': embed(False, 'false'),
+                 '==': lam_eq, '!=': lam_neq,
+                 '<': lam_lt, '<=': lam_leq, '>': lam_gt, '>=': lam_geq
+               }
+
+    def __init__(self, parser=None, exit_when_done=False):
         self.globals = {}
+        self.builtins = Repl.builtins
+        self.macros = dict(self.builtins)
         self.max_steps = 1000
         self.exit_when_done = exit_when_done
         self.last = None
@@ -319,18 +471,24 @@ class Repl(object):
 
         elif cmd == 'reset':
             print 'Resetting global variables'
-            self.globals = {}
+            self.global_reset()
 
         elif cmd == 'globals':
             print "Global variables:"
             for (k,v) in self.globals.iteritems():
                 print '  %s = %s' % (k, pretty(v))
 
+        elif cmd == 'builtins':
+            print 'Builtins: ' + ', '.join(sorted(self.builtins.keys()))
+            # for (k,v) in self.builtins.iteritems():
+            #     print '  %s = %s' % (k, pretty(v))
+
         elif rest.startswith('= '):
             # Setting a global
+            # FIXME: should check that cmd is valid var name
             e = self.parse(rest[2:])
             self.last = e
-            self.globals[cmd] = self.eval(e)
+            self.global_set(cmd, self.eval(e))
 
         else:
             # Default is to eval the expression.
@@ -358,7 +516,7 @@ class Repl(object):
             print 'Already a value:', pretty(expr)
 
     def parse(self, s):
-        return parse(s)
+        return parse(s, macros=self.macros)
 
     def eval(self, expr):
         for i in xrange(self.max_steps):
@@ -369,11 +527,26 @@ class Repl(object):
                        self.max_steps)
 
     def step(self, expr):
-        return step(expr, macros = self.globals)
+        return step(expr)
+
+    # managing globals and macros
+    def global_set(self, var, val):
+        self.globals[var] = val
+        self.macros[var]= val
+
+    def global_unset(self, var):
+        del self.globals[var]
+        del self.macros[var]
+        if var in self.builtins:
+            self.macros[var] = self.builtins[var]
+
+    def global_reset(self):
+        self.globals = {}
+        self.macros = dict(self.builtins)
 
 def repl():
     global r
-    if not isinstance(r, Repl):
+    if not "r" in globals() or not isinstance(r, Repl):
         r = Repl()
     r.repl()
 
