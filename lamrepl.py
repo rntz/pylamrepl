@@ -444,6 +444,7 @@ class Repl(object):
                 except LamError as e:
                     print 'Error:', e
                 except EOFError:
+                    print
                     self.exit()
         except ExitRepl:
             if self.exit_when_done:
@@ -550,4 +551,8 @@ def repl():
         r = Repl()
     r.repl()
 
-print 'here'
+if __name__ == 'hax':
+    print 'loaded'
+
+if __name__ == "__main__":
+    Repl(exit_when_done = True).repl()
